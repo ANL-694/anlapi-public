@@ -1,0 +1,119 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"anlapi/internal/config"
+	"anlapi/internal/pkg/tlsfingerprint"
+	"anlapi/internal/pkg/typesafe"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
+)
+
+type typeSafeTestAccountRepo struct {
+	AccountRepository
+	account    *Account
+	errorCalls int
+	errorMsg   string
+}
+
+func (r *typeSafeTestAccountRepo) GetByID(_ context.Context, _ int64) (*Account, error) {
+	return r.account, nil
+}
+
+func (r *typeSafeTestAccountRepo) SetError(_ context.Context, _ int64, message string) error {
+	r.errorCalls++
+	r.errorMsg = message
+	return nil
+}
+
+type typeSafeTestHTTPUpstream struct {
+	do func(*http.Request) (*http.Response, error)
+}
+
+func (u *typeSafeTestHTTPUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+	return u.do(req)
+}
+
+func (u *typeSafeTestHTTPUpstream) DoWithTLS(req *http.Request, _ string, _ int64, _ int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.do(req)
+}
+
+func newTypeSafeAccountTestFixture(t *testing.T, status int, body string) (*AccountTestService, *typeSafeTestAccountRepo, *[]*http.Request, *gin.Context, *httptest.ResponseRecorder) {
+	t.Helper()
+	account := &Account{ID: 31, Platform: PlatformTypeSafe, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "ts-secret"}}
+	repo := &typeSafeTestAccountRepo{account: account}
+	var requests []*http.Request
+	upstream := &typeSafeTestHTTPUpstream{do: func(req *http.Request) (*http.Response, error) {
+		requests = append(requests, req)
+		return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	}}
+	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream, cfg: &config.Config{}}
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/31/test", nil)
+	return svc, repo, &requests, c, rec
+}
+
+func TestTypeSafeAccountTestSendsNativeSystemOneRequest(t *testing.T) {
+	responseBody := `{"model":"jev-1.13.0","answers":{"connection_test":{"type":"noul"}},"usage":{"input_tokens":9}}`
+	svc, repo, requests, c, rec := newTypeSafeAccountTestFixture(t, http.StatusOK, responseBody)
+
+	require.NoError(t, svc.TestAccountConnection(c, 31, "claude-sonnet-4-5", "", AccountTestModeDefault))
+	require.Len(t, *requests, 1)
+	req := (*requests)[0]
+	require.Equal(t, typesafe.DefaultBaseURL+typesafe.SystemOnePath, req.URL.String())
+	require.Equal(t, "Bearer ts-secret", req.Header.Get("Authorization"))
+	require.Empty(t, req.Header.Get("x-api-key"))
+	body, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	model, err := typesafe.ValidateSystemOneRequest(body)
+	require.NoError(t, err)
+	require.Equal(t, typesafe.JevLatestModel, model)
+
+	output := rec.Body.String()
+	require.Contains(t, output, `"type":"test_start"`)
+	require.Contains(t, output, `"model":"jev-latest"`)
+	require.Contains(t, output, `"type":"test_complete"`)
+	require.Contains(t, output, "jev-1.13.0")
+	require.Zero(t, repo.errorCalls)
+}
+
+func TestTypeSafeAccountTestMarksRejectedKeyWithoutLeakingBody(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			svc, repo, _, c, rec := newTypeSafeAccountTestFixture(t, status, `{"detail":"invalid ts-secret"}`)
+			require.Error(t, svc.TestAccountConnection(c, 31, "", "", AccountTestModeDefault))
+			require.Equal(t, 1, repo.errorCalls)
+			require.Contains(t, repo.errorMsg, "credentials")
+			require.NotContains(t, rec.Body.String(), "ts-secret")
+			_, errMsg := parseTestSSEOutput(rec.Body.String())
+			require.Contains(t, errMsg, "TypeSafe API returned")
+		})
+	}
+}
+
+func TestTypeSafeAccountTestTransientFailureKeepsAccountState(t *testing.T) {
+	svc, repo, _, c, _ := newTypeSafeAccountTestFixture(t, http.StatusServiceUnavailable, `{"detail":"busy"}`)
+	require.Error(t, svc.TestAccountConnection(c, 31, "", "", AccountTestModeDefault))
+	require.Zero(t, repo.errorCalls)
+}
+
+func TestTypeSafeAccountTestUsesPromptAsState(t *testing.T) {
+	svc, _, requests, c, _ := newTypeSafeAccountTestFixture(t, http.StatusOK, `{"answers":{}}`)
+	require.NoError(t, svc.TestAccountConnection(c, 31, "", "custom state", AccountTestModeDefault))
+	body, err := io.ReadAll((*requests)[0].Body)
+	require.NoError(t, err)
+	var payload struct {
+		State string `json:"state"`
+	}
+	require.NoError(t, json.Unmarshal(body, &payload))
+	require.Equal(t, "custom state", payload.State)
+}

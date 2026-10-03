@@ -1,0 +1,110 @@
+# =============================================================================
+# anlapi Docker Compose - Local Development Build
+# =============================================================================
+# Build from local source code for testing changes.
+#
+# Usage:
+#   cd deploy
+#   docker compose -f docker-compose.dev.yml up --build
+# =============================================================================
+
+services:
+  anlapi:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: anlapi-dev
+    restart: unless-stopped
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${SERVER_PORT:-8080}:8080"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - AUTO_SETUP=true
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8080
+      - SERVER_MODE=debug
+      - ENABLE_SERVER_TIMING=${ENABLE_SERVER_TIMING:-false}
+      - RUN_MODE=${RUN_MODE:-standard}
+      - UPDATE_GITHUB_TOKEN=${UPDATE_GITHUB_TOKEN:-}
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=${POSTGRES_USER:-anlapi}
+      - DATABASE_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      - DATABASE_DBNAME=${POSTGRES_DB:-anlapi}
+      - DATABASE_SSLMODE=disable
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_USERNAME=${REDIS_USERNAME:-}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_DB=${REDIS_DB:-0}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@anlapi.local}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - SETUP_MIGRATION_TIMEOUT_SECONDS=${SETUP_MIGRATION_TIMEOUT_SECONDS:-0}
+      - JWT_SECRET=${JWT_SECRET:-}
+      - TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY:-}
+      - TZ=${TZ:-Asia/Shanghai}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - anlapi-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  postgres:
+    image: postgres:18-alpine
+    container_name: anlapi-postgres-dev
+    restart: unless-stopped
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-anlapi}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      - POSTGRES_DB=${POSTGRES_DB:-anlapi}
+      - PGDATA=/var/lib/postgresql/data
+      - TZ=${TZ:-Asia/Shanghai}
+    networks:
+      - anlapi-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-anlapi} -d ${POSTGRES_DB:-anlapi}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:8-alpine
+    container_name: anlapi-redis-dev
+    restart: unless-stopped
+    volumes:
+      - ./redis_data:/data
+    # sh -c 接收的是一个多行字符串，每个参数行必须显式续行。
+    command: >
+        sh -c '
+          redis-server \
+          --save 60 1 \
+          --appendonly yes \
+          --appendfsync everysec \
+          ${REDIS_PASSWORD:+--requirepass "$REDIS_PASSWORD"}'
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+      - REDISCLI_AUTH=${REDIS_PASSWORD:-}
+    networks:
+      - anlapi-network
+    healthcheck:
+      test: ["CMD-SHELL", "if [ -n \"$$REDISCLI_AUTH\" ]; then redis-cli ping; else unset REDISCLI_AUTH; redis-cli ping; fi"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+networks:
+  anlapi-network:
+    driver: bridge

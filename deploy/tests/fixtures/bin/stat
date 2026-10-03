@@ -1,0 +1,19 @@
+#!/bin/bash
+
+set -eu
+
+case "${1-}" in
+    -f)
+        format="${2-}"
+        target="${3-}"
+        case "${format}" in
+            %u) exec /usr/bin/stat -c '%u' "${target}" ;;
+            %Lp) exec /usr/bin/stat -c '%a' "${target}" ;;
+        esac
+        ;;
+    -c)
+        exec /usr/bin/stat "$@"
+        ;;
+esac
+
+exec /usr/bin/stat "$@"

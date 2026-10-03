@@ -1,0 +1,20 @@
+#!/bin/bash
+
+set -eu
+
+input="$(cat)"
+case "$*" in
+    *'configuration.labels'*)
+        labels="$(printf '%s' "$input" | sed -n 's/.*"labels":{\([^}]*\)}.*/\1/p')"
+        [[ -n "${labels}" ]] || exit 1
+        printf '{%s}\n' "${labels}"
+        ;;
+    *'status.networks.0.ipv4Address'*)
+        address="$(printf '%s' "$input" | sed -n 's/.*"ipv4Address":"\([^"]*\)".*/\1/p')"
+        [[ -n "${address}" ]] || exit 1
+        printf '%s\n' "${address}"
+        ;;
+    *)
+        exit 1
+        ;;
+esac

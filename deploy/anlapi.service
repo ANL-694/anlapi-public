@@ -1,0 +1,31 @@
+[Unit]
+Description=anlapi - AI API Gateway Platform
+Documentation=https://github.com/ANL-694/anlapi
+After=network.target postgresql.service redis.service
+Wants=postgresql.service redis.service
+
+[Service]
+Type=simple
+User=anlapi
+Group=anlapi
+WorkingDirectory=/opt/anlapi
+EnvironmentFile=/opt/anlapi/.env
+ExecStart=/opt/anlapi/anlapi
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=anlapi
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/anlapi
+
+# Environment
+Environment=GIN_MODE=release
+
+[Install]
+WantedBy=multi-user.target
